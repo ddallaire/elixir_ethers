@@ -56,10 +56,11 @@ defmodule Ethers.Event do
           |> Enum.map(fn {return, type} -> Utils.human_arg(return, type) end)
       end
 
-    [_ | sub_topics_raw] = topics_raw = Map.fetch!(log, "topics")
+    topics_raw = Map.fetch!(log, "topics")
 
     decoded_topics =
-      sub_topics_raw
+      topics_raw
+      |> Enum.drop(1)
       |> Enum.map(&Utils.hex_decode!/1)
       |> Enum.zip(ContractHelpers.event_indexed_types(selector))
       |> Enum.map(fn
@@ -99,8 +100,35 @@ defmodule Ethers.Event do
   """
   @spec find_and_decode(map(), module()) :: {:ok, t()} | {:error, :not_found}
   def find_and_decode(log, event_filters_module) do
-    [topic | _] = Map.fetch!(log, "topics")
+    topic =
+      log
+      |> Map.fetch!("topics")
+      |> case do
+        [topic | _] -> topic
+        _ -> nil
+      end
 
+    decode_log(log, topic, event_filters_module)
+  end
+
+  # Handle anonymous events
+  defp decode_log(log, nil, event_filters_module) do
+    selector =
+      Enum.find(
+        event_filters_module.__events__(),
+        fn %ABI.FunctionSelector{inputs_indexed: inputs_indexed} -> inputs_indexed == [false] end
+      )
+
+    case selector do
+      nil ->
+        {:error, :not_found}
+
+      %ABI.FunctionSelector{} ->
+        {:ok, decode(log, selector)}
+    end
+  end
+
+  defp decode_log(log, topic, event_filters_module) do
     topic_raw = Utils.hex_decode!(topic)
 
     selector =
