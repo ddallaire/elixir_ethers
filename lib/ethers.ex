@@ -643,6 +643,71 @@ defmodule Ethers do
   end
 
   @doc """
+  Streams event logs for all events in a contract's EventFilters module via WebSocket.
+
+  This function is similar to `get_logs_for_contract/3` but provides real-time streaming
+  of events as they occur on the blockchain, instead of querying historical logs.
+
+  Returns a GenServer process that manages the WebSocket subscription and automatically
+  decodes incoming events. Events are sent to the subscriber process as `{:event, %Ethers.Event{}}`
+  messages.
+
+  ## Parameters
+  - event_filters_module: The EventFilters module (e.g. `MyContract.EventFilters`)
+  - address: The contract address to filter events from (nil means all contracts)
+  - opts: Additional options (see below)
+
+  ## Options
+
+  - `:subscriber` - The process that will receive decoded events (defaults to `self()`)
+  - `:rpc_client` - The WebSocket RPC client to use (defaults to `Ethereumex.WebsocketClient`)
+  - `:topics` - Custom topics filter (defaults to all events from the EventFilters module)
+
+  ## Examples
+
+  ```elixir
+  # Stream all events from a contract
+  {:ok, stream} = Ethers.stream_logs_for_contract(MyContract.EventFilters, "0x1234...")
+
+  # Receive events in a loop
+  receive do
+    {:event, %Ethers.Event{} = event} ->
+      IO.inspect(event, label: "New event")
+  end
+
+  # Stop streaming when done
+  Ethers.EventStream.stop(stream)
+  ```
+
+  ## Receiving Events
+
+  Decoded events are sent to the subscriber process (defaults to the calling process) as
+  `{:event, %Ethers.Event{}}` messages. You can use standard Elixir `receive` blocks or
+  GenServer `handle_info/2` callbacks to process these events.
+
+  If there's an error with the subscription, you'll receive `{:event_stream_error, reason}`
+  and the stream process will terminate.
+
+  ## Note
+
+  This function requires a WebSocket connection to an Ethereum node. Make sure your
+  Ethereumex WebsocketClient is configured and the WebsocketServer is running.
+  """
+  @spec stream_logs_for_contract(module(), Types.t_address() | nil, Keyword.t()) ::
+          {:ok, pid()} | {:error, term()}
+  def stream_logs_for_contract(event_filters_module, address, opts \\ []) do
+    subscriber = Keyword.get(opts, :subscriber, self())
+
+    stream_opts =
+      opts
+      |> Keyword.put(:event_filters_module, event_filters_module)
+      |> Keyword.put(:address, address)
+      |> Keyword.put(:subscriber, subscriber)
+
+    Ethers.EventStream.start_link(stream_opts)
+  end
+
+  @doc """
   Combines multiple requests and make a batch json RPC request.
 
   It returns `{:ok, results}` in case of success or `{:error, reason}` in case of RPC failure.

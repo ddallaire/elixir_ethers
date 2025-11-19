@@ -462,11 +462,270 @@ defmodule Ethers.CounterContractTest do
     end
   end
 
+  describe "stream_logs_for_contract works with WebSocket" do
+    setup :deploy_counter_contract
+    setup :ensure_websocket_server
+
+    test "can stream events from the contract in real-time", %{address: address} do
+      # Start streaming
+      {:ok, stream} =
+        Ethers.stream_logs_for_contract(CounterContract.EventFilters, address, subscriber: self())
+
+      # Give the subscription time to establish
+      Process.sleep(100)
+
+      # Trigger an event
+      {:ok, tx_hash_1} =
+        CounterContract.set(101) |> Ethers.send_transaction(from: @from, to: address)
+
+      wait_for_transaction!(tx_hash_1)
+
+      # Should receive the event
+      assert_receive {:event,
+                      %Event{
+                        address: ^address,
+                        topics: ["SetCalled(uint256,uint256)", 100],
+                        data: [101]
+                      }},
+                     5_000
+
+      # Trigger another event
+      {:ok, tx_hash_2} =
+        CounterContract.reset() |> Ethers.send_transaction(from: @from, to: address)
+
+      wait_for_transaction!(tx_hash_2)
+
+      # Should receive the second event
+      assert_receive {:event,
+                      %Event{
+                        address: ^address,
+                        topics: ["ResetCalled()"],
+                        data: []
+                      }},
+                     5_000
+
+      # Clean up
+      Ethers.EventStream.stop(stream)
+    end
+
+    test "can stream multiple events in sequence", %{address: address} do
+      {:ok, stream} =
+        Ethers.stream_logs_for_contract(CounterContract.EventFilters, address, subscriber: self())
+
+      Process.sleep(100)
+
+      # Trigger multiple events
+      for i <- 1..3 do
+        {:ok, tx_hash} =
+          CounterContract.set(100 + i) |> Ethers.send_transaction(from: @from, to: address)
+
+        wait_for_transaction!(tx_hash)
+      end
+
+      # Should receive all 3 events
+      events =
+        for _i <- 1..3 do
+          assert_receive {:event, event}, 5_000
+          event
+        end
+
+      assert length(events) == 3
+
+      # Verify event data is correct
+      assert [
+               %Event{data: [101]},
+               %Event{data: [102]},
+               %Event{data: [103]}
+             ] = events
+
+      Ethers.EventStream.stop(stream)
+    end
+
+    test "stream only receives events for specified address", %{address: address} do
+      # Deploy a second contract
+      encoded_constructor = CounterContract.constructor(200)
+      address2 = deploy(CounterContract, encoded_constructor: encoded_constructor, from: @from)
+
+      # Stream only from first contract
+      {:ok, stream} =
+        Ethers.stream_logs_for_contract(CounterContract.EventFilters, address, subscriber: self())
+
+      Process.sleep(100)
+
+      # Trigger event on second contract
+      {:ok, tx_hash_2} =
+        CounterContract.set(201) |> Ethers.send_transaction(from: @from, to: address2)
+
+      wait_for_transaction!(tx_hash_2)
+
+      # Trigger event on first contract
+      {:ok, tx_hash_1} =
+        CounterContract.set(101) |> Ethers.send_transaction(from: @from, to: address)
+
+      wait_for_transaction!(tx_hash_1)
+
+      # Should only receive event from first contract
+      assert_receive {:event,
+                      %Event{
+                        address: ^address,
+                        data: [101]
+                      }},
+                     5_000
+
+      # Should not receive event from second contract
+      refute_receive {:event, %Event{address: ^address2}}, 1_000
+
+      Ethers.EventStream.stop(stream)
+    end
+
+    test "can have multiple concurrent streams", %{address: address} do
+      # Deploy second contract
+      encoded_constructor = CounterContract.constructor(200)
+      address2 = deploy(CounterContract, encoded_constructor: encoded_constructor, from: @from)
+
+      # Start two streams
+      {:ok, stream1} =
+        Ethers.stream_logs_for_contract(CounterContract.EventFilters, address, subscriber: self())
+
+      {:ok, stream2} =
+        Ethers.stream_logs_for_contract(CounterContract.EventFilters, address2,
+          subscriber: self()
+        )
+
+      Process.sleep(100)
+
+      # Trigger events on both contracts
+      {:ok, tx_hash_1} =
+        CounterContract.set(101) |> Ethers.send_transaction(from: @from, to: address)
+
+      wait_for_transaction!(tx_hash_1)
+
+      {:ok, tx_hash_2} =
+        CounterContract.set(201) |> Ethers.send_transaction(from: @from, to: address2)
+
+      wait_for_transaction!(tx_hash_2)
+
+      # Should receive events from both contracts
+      assert_receive {:event, %Event{address: ^address, data: [101]}}, 5_000
+      assert_receive {:event, %Event{address: ^address2, data: [201]}}, 5_000
+
+      Ethers.EventStream.stop(stream1)
+      Ethers.EventStream.stop(stream2)
+    end
+
+    test "returns subscription ID", %{address: address} do
+      {:ok, stream} =
+        Ethers.stream_logs_for_contract(CounterContract.EventFilters, address, subscriber: self())
+
+      Process.sleep(100)
+
+      {:ok, subscription_id} = Ethers.EventStream.get_subscription_id(stream)
+      assert is_binary(subscription_id)
+      assert String.starts_with?(subscription_id, "0x")
+
+      Ethers.EventStream.stop(stream)
+    end
+
+    test "handles stream with nil address (all contracts)", %{address: address} do
+      # Stream from all contracts
+      {:ok, stream} =
+        Ethers.stream_logs_for_contract(CounterContract.EventFilters, nil, subscriber: self())
+
+      Process.sleep(100)
+
+      # Trigger event
+      {:ok, tx_hash} =
+        CounterContract.set(101) |> Ethers.send_transaction(from: @from, to: address)
+
+      wait_for_transaction!(tx_hash)
+
+      # Should still receive the event
+      assert_receive {:event,
+                      %Event{
+                        address: ^address,
+                        data: [101]
+                      }},
+                     5_000
+
+      Ethers.EventStream.stop(stream)
+    end
+
+    test "stops receiving events after stream is stopped", %{address: address} do
+      {:ok, stream} =
+        Ethers.stream_logs_for_contract(CounterContract.EventFilters, address, subscriber: self())
+
+      Process.sleep(100)
+
+      # Stop the stream
+      Ethers.EventStream.stop(stream)
+      Process.sleep(100)
+
+      # Trigger event after stopping
+      {:ok, tx_hash} =
+        CounterContract.set(101) |> Ethers.send_transaction(from: @from, to: address)
+
+      wait_for_transaction!(tx_hash)
+
+      # Should not receive the event
+      refute_receive {:event, _}, 2_000
+    end
+
+    test "can filter by specific event using topics", %{address: address} do
+      # Get only SetCalled events (not ResetCalled)
+      set_called_topic = "0x9db4e91e99652c2cf1713076f100fca6a4f5b81f166bce406ff2b3012694f49f"
+
+      {:ok, stream} =
+        Ethers.stream_logs_for_contract(CounterContract.EventFilters, address,
+          subscriber: self(),
+          topics: [set_called_topic]
+        )
+
+      Process.sleep(100)
+
+      # Trigger a SetCalled event
+      {:ok, tx_hash_1} =
+        CounterContract.set(101) |> Ethers.send_transaction(from: @from, to: address)
+
+      wait_for_transaction!(tx_hash_1)
+
+      # Should receive SetCalled event
+      assert_receive {:event, %Event{topics: ["SetCalled(uint256,uint256)", 100], data: [101]}},
+                     5_000
+
+      # Trigger a ResetCalled event
+      {:ok, tx_hash_2} =
+        CounterContract.reset() |> Ethers.send_transaction(from: @from, to: address)
+
+      wait_for_transaction!(tx_hash_2)
+
+      # Should not receive ResetCalled event (filtered out)
+      refute_receive {:event, %Event{topics: ["ResetCalled()"]}}, 1_000
+
+      Ethers.EventStream.stop(stream)
+    end
+  end
+
   defp deploy_counter_contract(_ctx) do
     encoded_constructor = CounterContract.constructor(100)
 
     address = deploy(CounterContract, encoded_constructor: encoded_constructor, from: @from)
 
     [address: address]
+  end
+
+  defp ensure_websocket_server(_ctx) do
+    case Process.whereis(Ethereumex.WebsocketServer) do
+      nil ->
+        # Start WebSocket server for testing
+        # Uses the default config from config/test.exs
+        {:ok, _pid} = Ethereumex.WebsocketServer.start_link()
+        Process.sleep(500)
+        :ok
+
+      _pid ->
+        :ok
+    end
+
+    :ok
   end
 end
