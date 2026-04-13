@@ -63,15 +63,14 @@ defmodule Ethers.Event do
       |> Enum.drop(1)
       |> Enum.map(&Utils.hex_decode!/1)
       |> Enum.zip(ContractHelpers.event_indexed_types(selector))
-      |> Enum.map(fn
-        {data, :string} ->
-          {Utils.hex_encode(data), :string}
-
-        {data, type} ->
-          [decoded] = TypeDecoder.decode_raw(data, [type])
-          {decoded, type}
+      |> Enum.map(fn {raw, type} ->
+        if dynamic_indexed_type?(type) do
+          Utils.hex_encode(raw)
+        else
+          [decoded] = TypeDecoder.decode_raw(raw, [type])
+          Utils.human_arg(decoded, type)
+        end
       end)
-      |> Enum.map(fn {data, type} -> Utils.human_arg(data, type) end)
 
     topics = [FunctionSelector.encode(selector) | decoded_topics]
 
@@ -145,4 +144,11 @@ defmodule Ethers.Event do
         {:ok, decode(log, selector)}
     end
   end
+
+  defp dynamic_indexed_type?(:string), do: true
+  defp dynamic_indexed_type?(:bytes), do: true
+  defp dynamic_indexed_type?({:array, _}), do: true
+  defp dynamic_indexed_type?({:array, _, _}), do: true
+  defp dynamic_indexed_type?({:tuple, _}), do: true
+  defp dynamic_indexed_type?(_), do: false
 end
